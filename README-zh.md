@@ -1,16 +1,16 @@
 # GxScript
-[中文](README-zh.md)
+[English](README.md)
 
-Based on GxAny, a Lua script engine that truly supports multithreading.
+基于GxAny，一个支持真多线程的Lua脚本引擎。
 
-## Features
-- Bind C++ types through GAny and provide them for Lua to use.
-- Provide functionality written in the target language through GAny binding for Lua to use.
-- Create types in Lua through GAny and provide them for use in C++or other languages.
-- Using True Multi threaded Asynchronous Programming in Lua.
-- Make the code written by Lua a GAny plugin.
+## 功能
+- 通过 GAny 绑定 C++ 类型, 提供给 Lua 使用.
+- 通过 GAny 绑定目标语言编写的功能, 提供给 Lua 使用.
+- 通过 GAny 将 Lua 中创建类型, 提供给 C++ 或其他语言使用.
+- 在 Lua 中使用真多线程异步编程.
+- 让 Lua 编写的代码成为 GAny 插件.
 
-## 快速开始
+## Quick Start
 ```cpp
 #include <cstdlib>
 #include <gx/gany_core.h>
@@ -80,9 +80,9 @@ return vObj.v;
 }
 ```
 
-## Third party libraries used
+## 使用的第三方库
 - [lua](https://www.lua.org)
 - [gtest](https://github.com/google/googletest)
 
 ## 许可
-`GxScript` is licensed under the [MIT License](LICENSE.txt).
+`GxScript` 根据 [MIT许可证](LICENSE.txt) 授权。
