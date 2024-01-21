@@ -31,10 +31,8 @@ GX_NS_BEGIN
 void GAnyClassToLua::toLua(lua_State *L)
 {
     const luaL_Reg staticMethods[] = {
-            {"Class",         regClass},
-            {"registerToEnv", regRegisterToEnv},
-
-            {nullptr,         nullptr}
+            {"Class", regClass},
+            {nullptr, nullptr}
     };
 
     const luaL_Reg methods[] = {
@@ -252,18 +250,6 @@ int GAnyClassToLua::regInherit(lua_State *L)
     pushGAnyClass(L, *self);
 
     return 1;
-}
-
-int GAnyClassToLua::regRegisterToEnv(lua_State *L)
-{
-    GAny *self = glua_getcppobject(L, GAny, 1);
-    if (!self) {
-        luaL_error(L, "Call GAnyClass registerToEnv error: null object");
-        return 0;
-    }
-
-    GAnyClass::registerToEnv(self->as<std::shared_ptr<GAnyClass>>());
-    return 0;
 }
 
 int GAnyClassToLua::regFunc(lua_State *L)

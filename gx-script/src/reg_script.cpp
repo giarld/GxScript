@@ -83,11 +83,19 @@ REGISTER_GANY_MODULE(GxScript)
                "arg1: Lua script text; \n"
                "return: Returns the return value of the script.")
             .func("script", [](GAnyLuaVM &self, const std::string &script, const GAny &env) {
-                return self.script(script, env);
+                return self.script(script, "", env);
             }, "Load and run Lua program from text. \n"
                "arg1: Lua script text; \n"
                "arg2: The environment variable (data) passed to Lua program must be a GAnyObject; \n"
                "return: Returns the return value of the script.")
+            .func("script",
+                  [](GAnyLuaVM &self, const std::string &script, const std::string &sourcePath, const GAny &env) {
+                      return self.script(script, sourcePath, env);
+                  }, "Load and run Lua program from text. \n"
+                     "arg1: Lua script text; \n"
+                     "arg2: Code source path (file path or URI); \n"
+                     "arg3: The environment variable (data) passed to Lua program must be a GAnyObject; \n"
+                     "return: Returns the return value of the script.")
             .func("scriptFile", [](GAnyLuaVM &self, const std::string &filePath) {
                 return self.scriptFile(filePath);
             }, "Loading and Running Lua Programs from Files. \n"
@@ -105,11 +113,19 @@ REGISTER_GANY_MODULE(GxScript)
                "arg1: Lua script or bytecode data stream Bytes Arrays; \n"
                "return: Returns the return value of the script.")
             .func("scriptBuffer", [](GAnyLuaVM &self, const GByteArray &buffer, const GAny &env) {
-                return self.scriptBuffer(buffer, env);
+                return self.scriptBuffer(buffer, "", env);
             }, "Loading and Running Lua Programs from Bytes Arrays. \n"
                "arg1: Lua script or bytecode data stream Bytes Arrays; \n"
                "arg2: The environment variable (data) passed to Lua program must be a GAnyObject; \n"
                "return: Returns the return value of the script.")
+            .func("scriptBuffer",
+                  [](GAnyLuaVM &self, const GByteArray &buffer, const std::string &sourcePath, const GAny &env) {
+                      return self.scriptBuffer(buffer, sourcePath, env);
+                  }, "Loading and Running Lua Programs from Bytes Arrays. \n"
+                     "arg1: Lua script or bytecode data stream Bytes Arrays; \n"
+                     "arg2: Code source path (file path or URI); \n"
+                     "arg3: The environment variable (data) passed to Lua program must be a GAnyObject; \n"
+                     "return: Returns the return value of the script.")
             .func("gc", &GAnyLuaVM::gc, "Trigger garbage collection for Lua virtual machine.")
             .func("gcStep", &GAnyLuaVM::gcStep, "GC step, Only incremental mode is valid.")
             .func("gcSetStepMul", &GAnyLuaVM::gcSetStepMul, "Set GC step rate, Only incremental mode is valid.")
@@ -117,18 +133,58 @@ REGISTER_GANY_MODULE(GxScript)
             .func("gcStop", &GAnyLuaVM::gcStop, "Stop garbage collector.")
             .func("gcRestart", &GAnyLuaVM::gcRestart, "Restart the garbage collector.")
             .func("gcIsRunning", &GAnyLuaVM::gcIsRunning, "Returns whether the garbage collector is running.")
-            .func("gcGetCount", &GAnyLuaVM::gcGetCount, "Returns the amount of memory used by the current Lua virtual machine (in kb).")
+            .func("gcGetCount", &GAnyLuaVM::gcGetCount,
+                  "Returns the amount of memory used by the current Lua virtual machine (in kb).")
             .func("gcModeGen", &GAnyLuaVM::gcModeGen, "Switch garbage collector to generational mode.")
             .func("gcModeInc", &GAnyLuaVM::gcModeInc, "Switch the garbage collector to incremental mode.")
-            .staticFunc("setExceptionHandler", &GAnyLuaVM::setExceptionHandler,
+            .staticFunc("setExceptionHandler",
+                        [](const GAny &handler) {
+                            if (handler.isFunction()) {
+                                GAnyLuaVM::setExceptionHandler([handler](const std::string &e) {
+                                    try {
+                                        handler(e);
+                                    } catch (GAnyException &) {
+                                    }
+                                });
+                            } else {
+                                GAnyLuaVM::setExceptionHandler(nullptr);
+                            }
+                        },
                         "Set the exception handler, after which all exception information will be returned from handlerFunc. \n"
                         "If not set, you can handle the exception yourself.")
+            .staticFunc("setScriptReader",
+                        [](const GAny &reader) {
+                            if (reader.isFunction()) {
+                                GAnyLuaVM::setScriptReader([reader](const std::string &path) {
+                                    try {
+                                        return reader(path).as<GByteArray>();
+                                    } catch (GAnyException &) {
+                                    }
+                                    return GByteArray();
+                                });
+                            } else {
+                                GAnyLuaVM::setScriptReader(nullptr);
+                            }
+                        },
+                        "Set up a script reader. If a custom script reader is set up, "
+                        "the custom reader will be called when using \"scriptFile\" and \"requireLs\" to read the script file.")
+            .func("compileCode", &GAnyLuaVM::compileCode,
+                  "Compile from code to generate bytecode.\n"
+                  "arg1: Lua source code;\n"
+                  "arg2: Code source path (file path or URI);\n"
+                  "arg3: Strip debug information;\n"
+                  "return: bytecode.")
+            .func("compileFile", &GAnyLuaVM::compileFile,
+                  "Load code from source code file and generate bytecode.\n"
+                  "arg1: Path to Lua source code file;\n"
+                  "arg2: Strip debug information;\n"
+                  "return: bytecode.")
             .func(MetaFunction::EqualTo, [](GAnyLuaVM &self, const GAnyLuaVM &rhs) {
                 return self == rhs;
             });
 
     // Set Lua plugin loader
-    GEnv.getItem("setPluginLoaders")("Ls", [](const std::string &searchPath, const std::string &pluginName) {
+    GAny::Import("setPluginLoaders")("Ls", [](const std::string &searchPath, const std::string &pluginName) {
         GFile dir(searchPath);
 
         GFile scriptFile;
@@ -146,7 +202,6 @@ REGISTER_GANY_MODULE(GxScript)
         auto lua = GAnyLuaVM::threadLocal();
 
         GAny env = GAny::object();
-        env["GEnv"] = GEnv;
         try {
             lua->scriptFile(scriptFile.absoluteFilePath(), env);
             return true;

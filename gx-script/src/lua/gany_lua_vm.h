@@ -61,6 +61,11 @@ struct UpValueItem
 class GAnyLuaVM
 {
 public:
+    using ScriptReader = std::function<GByteArray(const std::string &path)>;
+
+    using ExceptionHandler = std::function<void(const std::string &exception)>;
+
+public:
     explicit GAnyLuaVM();
 
     ~GAnyLuaVM();
@@ -82,12 +87,21 @@ public:
 
 public:
     /**
+     * @brief Load Lua script file from the set G Any plugin search path and execute it
+     * @param name  Script file name (may not have a suffix)
+     * @param env   Transferred environment variables
+     * @return
+     */
+    GAny requireLs(const std::string &name, const GAny &env);
+
+    /**
      * @brief Load and run Lua program from text
-     * @param script    Lua script text
-     * @param env       The environment variable (data) passed to Lua program must be a GAnyObject
+     * @param script        Lua script text
+     * @param sourcePath    Code source path (file path or URI)
+     * @param env           The environment variable (data) passed to Lua program must be a GAnyObject
      * @return Returns the return value of the script
      */
-    GAny script(const std::string &script, const GAny &env = GAny::object());
+    GAny script(const std::string &script, std::string sourcePath = "", const GAny &env = GAny::object());
 
     /**
      * @brief Loading and Running Lua Programs from Files
@@ -100,10 +114,11 @@ public:
     /**
      * @brief Loading and Running Lua Programs from Bytes Arrays
      * @param buffer    Lua script or bytecode data stream Bytes Arrays
+     * @param sourcePath    Code source path (file path or URI)
      * @param env       The environment variable (data) passed to Lua program must be a GAnyObject
      * @return Returns the return value of the script
      */
-    GAny scriptBuffer(const GByteArray &buffer, const GAny &env = GAny::object());
+    GAny scriptBuffer(const GByteArray &buffer, std::string sourcePath = "", const GAny &env = GAny::object());
 
     /**
      * @brief Trigger garbage collection for Lua virtual machine
@@ -171,30 +186,19 @@ public:
     /**
      * @brief Set the exception handler, after which all exception information will be returned from handlerFunc.
      *        If not set, you can handle the exception yourself
-     * @param handlerFunc
+     * @param handler
      */
-    static void setExceptionHandler(const GAny &handlerFunc);
-
-public:
-    /**
-     * @brief Require the Lua script file, which will be passed in to env and executed
-     * @param path  Search Path
-     * @param name  Script file name (may not have a suffix)
-     * @param env   Transferred environment variables
-     * @return
-     */
-    GAny requireLs(const std::string &path, const std::string &name, const GAny &env);
+    static void setExceptionHandler(ExceptionHandler handler);
 
     /**
-     * @brief Load Lua script file from the set G Any plugin search path and execute it
-     * @param name  Script file name (may not have a suffix)
-     * @param env   Transferred environment variables
-     * @return
+     * @brief   Set up a script reader. If a custom script reader is set up,
+     *          the custom reader will be called when using "scriptFile" and "requireLs" to read the script file.
+     * @param reader
      */
-    GAny requireLs(const std::string &name, const GAny &env);
+    static void setScriptReader(ScriptReader reader);
 
 private:
-    GAny loadScriptFunc(const GAny &source, const std::string &type, const GAny &env);
+    GAny loadScriptFromBuffer(const GByteArray &buffer, const std::string &sourcePath, const GAny &env);
 
     void addLFunctionRef(const std::shared_ptr<LuaFunction> &ref);
 
@@ -301,6 +305,27 @@ public:    /// Tools
      */
     static bool isGAnyLuaObj(lua_State *L, int idx);
 
+public:
+    /**
+     * @brief Compile from code to generate bytecode
+     * @param code          Lua source code
+     * @param sourcePath    Code source path (file path or URI)
+     * @param strip         Strip debug information
+     * @return  bytecode
+     */
+    GByteArray compileCode(const std::string &code, std::string sourcePath, bool strip);
+
+    /**
+     * @brief Load code from source code file and generate bytecode
+     * @param filePath  Path to Lua source code file
+     * @param strip     Strip debug information
+     * @return  bytecode
+     */
+    GByteArray compileFile(const std::string &filePath, bool strip);
+
+private:
+    GByteArray compile(const GByteArray &buffer, const std::string &sourcePath, bool strip);
+
 private:
     friend class GLuaFunctionRef;
 
@@ -309,7 +334,8 @@ private:
     std::vector<std::shared_ptr<LuaFunction>> mLFuncs;
     GMutex mFuncsLock;
 
-    static GAny sExceptionHandler;  // function(GAnyException e)
+    static ScriptReader sScriptReader;
+    static ExceptionHandler sExceptionHandler;
 };
 
 GX_NS_END

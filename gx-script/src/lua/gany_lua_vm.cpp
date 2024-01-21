@@ -33,21 +33,37 @@
 
 #include <math.h>
 
+#include <utility>
+
+#ifndef LUA_BUILD_AS_CPP
+extern "C" {
+#endif
+
+#include "lobject.h"
+#include "lstate.h"
+
+#ifndef LUA_BUILD_AS_CPP
+}
+#endif
+
 
 #define HANDLE_EXCEPTION(e) \
-    do {    \
+    do {                    \
+        std::string exception = std::string("GAnyLuaVM Exception: ") + e; \
         if (sExceptionHandler) {    \
-            sExceptionHandler(e);   \
+            sExceptionHandler(exception);   \
             return GAny::undefined();    \
         } else {    \
-            throw e;  \
+            throw GAnyException(exception);  \
         }   \
     } while(false)
 
 
 GX_NS_BEGIN
 
-GAny GAnyLuaVM::sExceptionHandler = GAny::undefined();
+GAnyLuaVM::ScriptReader GAnyLuaVM::sScriptReader = nullptr;
+
+GAnyLuaVM::ExceptionHandler GAnyLuaVM::sExceptionHandler = nullptr;
 
 GAnyLuaVM::GAnyLuaVM()
 {
@@ -86,19 +102,99 @@ void GAnyLuaVM::shutdown()
     }
 }
 
-GAny GAnyLuaVM::script(const std::string &script, const GAny &env)
+GAny GAnyLuaVM::requireLs(const std::string &name, const GAny &env)
 {
-    return loadScriptFunc(script, "text", env);
+    std::string path = name;
+    GFile file = [&]() {
+        auto searchPaths = GAny::Import("getPluginSearchPaths")().castAs<std::vector<std::string>>();
+
+        for (const auto &path: searchPaths) {
+            GFile dir(path);
+            if (!dir.isDirectory()) {
+                continue;
+            }
+            GFile f(dir, name);
+            if (f.exists() && f.isFile()) {
+                return f;
+            }
+            f = GFile(dir, name + ".lsc");
+            if (f.exists() && f.isFile()) {
+                return f;
+            }
+            f = GFile(dir, name + ".lua");
+            if (f.exists() && f.isFile()) {
+                return f;
+            }
+        }
+
+        return GFile();
+    }();
+    if (!file.exists()) {
+        if (!sScriptReader) {
+            LogE("requireLs: %s is not found", name.c_str());
+            return GAny::undefined();
+        } else {
+            path = name;
+        }
+    } else {
+        path = file.absoluteFilePath();
+    }
+
+    return scriptFile(path, env);
+}
+
+GAny GAnyLuaVM::script(const std::string &script, std::string sourcePath, const GAny &env)
+{
+    if (sourcePath.empty()) {
+        GString scriptStr = script;
+        // Ensure that UTF-8 characters are not truncated
+        if (scriptStr.count() > 512) {
+            scriptStr = scriptStr.left(512) + "...";
+        }
+        sourcePath = scriptStr.toStdString();
+    } else if (sourcePath[0] != '@') {
+        sourcePath = "@" + sourcePath;
+    }
+    GByteArray buffer;
+    buffer.write(script.data(), script.size());
+    return loadScriptFromBuffer(buffer, sourcePath, env);
 }
 
 GAny GAnyLuaVM::scriptFile(const std::string &filePath, const GAny &env)
 {
-    return loadScriptFunc(filePath, "file", env);
+    GByteArray buffer;
+    if (sScriptReader) {
+        buffer = sScriptReader(filePath);
+    } else {
+        GFile file(filePath);
+
+        if (!file.exists()) {
+            HANDLE_EXCEPTION("Run lua script error: file(" + filePath + ") does not exist.");
+        }
+
+        if (file.open(GFile::ReadOnly | GFile::Binary)) {
+            buffer = file.read();
+            file.close();
+        } else {
+            HANDLE_EXCEPTION("Open file failure.");
+        }
+    }
+
+    if (!buffer.isEmpty()) {
+        return loadScriptFromBuffer(buffer, "@" + filePath, env);
+    }
+
+    return GAny::undefined();
 }
 
-GAny GAnyLuaVM::scriptBuffer(const GByteArray &buffer, const GAny &env)
+GAny GAnyLuaVM::scriptBuffer(const GByteArray &buffer, std::string sourcePath, const GAny &env)
 {
-    return loadScriptFunc(buffer, "buffer", env);
+    if (sourcePath.empty()) {
+        sourcePath = "@buffer://" + GByteArray::md5Sum(buffer).toHexString();
+    } else if (sourcePath[0] != '@') {
+        sourcePath = "@" + sourcePath;
+    }
+    return loadScriptFromBuffer(buffer, sourcePath, env);
 }
 
 void GAnyLuaVM::gc()
@@ -151,223 +247,70 @@ void GAnyLuaVM::gcModeInc()
     lua_gc(mL, LUA_GCINC, 0);
 }
 
-void GAnyLuaVM::setExceptionHandler(const GAny &handlerFunc)
+void GAnyLuaVM::setExceptionHandler(ExceptionHandler handler)
 {
-    sExceptionHandler = handlerFunc;
+    sExceptionHandler = std::move(handler);
+}
+
+void GAnyLuaVM::setScriptReader(GAnyLuaVM::ScriptReader reader)
+{
+    sScriptReader = std::move(reader);
 }
 
 
-GAny GAnyLuaVM::requireLs(const std::string &path, const std::string &name, const GAny &env)
+GAny GAnyLuaVM::loadScriptFromBuffer(const GByteArray &buffer, const std::string &sourcePath, const GAny &env)
 {
-    GFile file = [&]() {
-        std::string tPath = path.empty() ? "./" : path;
-        GFile dir(tPath);
-        if (!dir.isDirectory()) {
-            return GFile();
-        }
+    lua_State *L = mL;
 
-        GFile f(dir, name);
-        if (f.exists() && f.isFile()) {
-            return f;
-        }
-        f = GFile(dir, name + ".lsc");
-        if (f.exists() && f.isFile()) {
-            return f;
-        }
-        f = GFile(dir, name + ".lua");
-        if (f.exists() && f.isFile()) {
-            return f;
-        }
-        return GFile();
-    }();
-    if (!file.exists()) {
-        LogE("requireLs: %s is not found", name.c_str());
-        return GAny::undefined();
-    }
-    return scriptFile(file.absoluteFilePath(), env);
-}
+    if (buffer.size() - buffer.readPos() > 4) {
+        char head[4];
+        buffer.read(head, 4);
+        if (head[0] == (char) 0xff && head[1] == 'l' && head[2] == 's' && head[3] == (char) 0xee) {
+            GByteArray data;
+            buffer >> data;
 
-GAny GAnyLuaVM::requireLs(const std::string &name, const GAny &env)
-{
-    GFile file = [&]() {
-        auto searchPaths = GEnv.getItem("getPluginSearchPaths")().castAs<std::vector<std::string>>();
-
-        for (const auto &path: searchPaths) {
-            GFile dir(path);
-            if (!dir.isDirectory()) {
-                continue;
+            if (GByteArray::isCompressed(data)) {
+                data = GByteArray::uncompress(data);
             }
-            GFile f(dir, name);
-            if (f.exists() && f.isFile()) {
-                return f;
-            }
-            f = GFile(dir, name + ".lsc");
-            if (f.exists() && f.isFile()) {
-                return f;
-            }
-            f = GFile(dir, name + ".lua");
-            if (f.exists() && f.isFile()) {
-                return f;
-            }
-        }
 
-        return GFile();
-    }();
-    if (!file.exists()) {
-        LogE("requireLs: %s is not found", name.c_str());
-        return GAny::undefined();
-    }
-    return scriptFile(file.absoluteFilePath(), env);
-}
-
-GAny GAnyLuaVM::loadScriptFunc(const GAny &source, const std::string &type, const GAny &env)
-{
-    if (!env.isObject()) {
-        HANDLE_EXCEPTION(GAnyException("GAnyLua environment must be an GAnyObject."));
-    }
-
-    using LoadFunc = std::function<GAny(lua_State *L, const GAny &source, const GAny &env)>;
-
-    auto loadFromBuffer = [this](lua_State *L,
-                                 const GByteArray &buffer,
-                                 const GAny &env) -> GAny {
-        if (buffer.size() - buffer.readPos() > 4) {
-            char head[4];
-            buffer.read(head, 4);
-            if (head[0] == (char) 0xff && head[1] == 'l' && head[2] == 's' && head[3] == (char) 0xee) {
-                GByteArray data;
-                buffer >> data;
-
-                if (GByteArray::isCompressed(data)) {
-                    data = GByteArray::uncompress(data);
-                }
-
-                if (luaL_loadbuffer(
-                            L, (const char *) data.data(),
-                            (size_t) data.size(),
-                            (const char *) GByteArray::md5Sum(data).toHexString().c_str()) != LUA_OK) {
-                    HANDLE_EXCEPTION(GAnyException("GAnyLua load buffer failure"));
-                }
-
-                GAnyLuaVM::setEnvironment(L, env, lua_gettop(L));
-
-                if (lua_pcall(L, 0, 1, 0) != LUA_OK) {
-                    const char *err = lua_tostring(L, -1);
-                    HANDLE_EXCEPTION(GAnyException(err));
-                }
-                GAny ret = makeLuaObjectToGAny(L, lua_gettop(L));
-                lua_pop(L, 1);
-                return ret;
-            }
-            buffer.seekReadPos(SEEK_CUR, -4);
-        }
-
-        if (luaL_loadbuffer(
-                    L, (const char *) buffer.data(),
-                    (size_t) buffer.size(),
-                    (const char *) GByteArray::md5Sum(buffer).toHexString().c_str()) != LUA_OK) {
-            HANDLE_EXCEPTION(GAnyException("GAnyLua load buffer failure"));
-        }
-
-        GAnyLuaVM::setEnvironment(L, env, lua_gettop(L));
-
-        if (lua_pcall(L, 0, 1, 0) != LUA_OK) {
-            const char *err = lua_tostring(L, -1);
-            HANDLE_EXCEPTION(GAnyException(err));
-        }
-        GAny ret = makeLuaObjectToGAny(L, lua_gettop(L));
-        lua_pop(L, 1);
-        return ret;
-    };
-
-    LoadFunc loadFunc;
-    if (type == "file") {
-        GFile file(source.toString());
-
-        if (!file.exists()) {
-            std::stringstream ess;
-            ess << "GAnyLua, run lua script error: file(" << source.toString() << ") " << "does not exist";
-            HANDLE_EXCEPTION(GAnyException(ess.str()));
-        }
-
-        if (file.open(GFile::ReadOnly | GFile::Binary)) {
-            if (file.fileSize() > 4) {
-                char head[4];
-                file.read(head, 4);
-                if (head[0] == (char) 0xff && head[1] == 'l' && head[2] == 's' && head[3] == (char) 0xee) {
-                    loadFunc = [loadFromBuffer](lua_State *L, const GAny &source, const GAny &env) {
-                        GFile file(source.toString());
-                        if (file.open(GFile::ReadOnly | GFile::Binary)) {
-                            GByteArray buffer = file.read();
-                            file.close();
-
-                            return loadFromBuffer(L, buffer, env);
-                        } else {
-                            HANDLE_EXCEPTION(GAnyException("GAnyLua, open file failure"));
-                        }
-                        return GAny::undefined();
-                    };
-                }
-            }
-            file.close();
-        }
-        if (!loadFunc) {
-            loadFunc = [](lua_State *L, const GAny &source, const GAny &env) {
-                if (luaL_loadfile(L, source.toString().c_str()) != LUA_OK) {
-                    std::stringstream ess;
-                    ess << "GAnyLua, load file failure: " << source.toString();
-                    HANDLE_EXCEPTION(GAnyException(ess.str()));
-                }
-
-                GAnyLuaVM::setEnvironment(L, env, lua_gettop(L));
-
-                if (lua_pcall(L, 0, 1, 0) != LUA_OK) {
-                    const char *err = lua_tostring(L, -1);
-                    HANDLE_EXCEPTION(GAnyException(err));
-                }
-                GAny ret = makeLuaObjectToGAny(L, lua_gettop(L));
-                lua_pop(L, 1);
-                return ret;
-            };
-        }
-    } else if (type == "text") {
-        loadFunc = [](lua_State *L, const GAny &source, const GAny &env) {
-            GString script = source.toString();
-            GString name;
-            if (script.count() <= 512) {
-                name = script;
-            } else {
-                name = script.left(512) + "...";
-            }
-            if (luaL_loadbuffer(L, (const char *) script.data(),
-                                (size_t) script.count(),
-                                name.c_str()) != LUA_OK) {
-                std::stringstream ess;
-                ess << "GAnyLua, load text failure: " << name;
-                HANDLE_EXCEPTION(GAnyException(ess.str()));
+            if (luaL_loadbuffer(
+                        L, (const char *) data.data(),
+                        (size_t) data.size(),
+                        (const char *) sourcePath.c_str()) != LUA_OK) {
+                const char *err = lua_tostring(L, -1);
+                HANDLE_EXCEPTION(err);
             }
 
             GAnyLuaVM::setEnvironment(L, env, lua_gettop(L));
 
             if (lua_pcall(L, 0, 1, 0) != LUA_OK) {
                 const char *err = lua_tostring(L, -1);
-                HANDLE_EXCEPTION(GAnyException(err));
+                HANDLE_EXCEPTION(err);
             }
             GAny ret = makeLuaObjectToGAny(L, lua_gettop(L));
             lua_pop(L, 1);
             return ret;
-        };
-    } else if (type == "buffer") {
-        loadFunc = [loadFromBuffer](lua_State *L, const GAny &source, const GAny &env) {
-            return loadFromBuffer(L, source.as<GByteArray>(), env);
-        };
+        }
+        buffer.seekReadPos(SEEK_CUR, -4);
     }
 
-    if (!loadFunc) {
-        HANDLE_EXCEPTION(GAnyException(std::string("Run lua script error: Unknown type: ") + type));
+    if (luaL_loadbuffer(
+                L, (const char *) buffer.data(),
+                (size_t) buffer.size(),
+                (const char *) sourcePath.c_str()) != LUA_OK) {
+        const char *err = lua_tostring(L, -1);
+        HANDLE_EXCEPTION(err);
     }
 
-    return loadFunc(mL, source, env);
+    GAnyLuaVM::setEnvironment(L, env, lua_gettop(L));
+
+    if (lua_pcall(L, 0, 1, 0) != LUA_OK) {
+        const char *err = lua_tostring(L, -1);
+        HANDLE_EXCEPTION(err);
+    }
+    GAny ret = makeLuaObjectToGAny(L, lua_gettop(L));
+    lua_pop(L, 1);
+    return ret;
 }
 
 void GAnyLuaVM::addLFunctionRef(const std::shared_ptr<LuaFunction> &ref)
@@ -471,6 +414,12 @@ void GAnyLuaVM::setEnvironment(lua_State *L, const GAny &env, int funcIdx)
         lua_pushliteral(L, "LEnv");
         pushGAny(L, env);
         lua_settable(L, top);
+
+        env.call("forEach", [&](const std::string &k, const GAny &v) {
+            lua_pushstring(L, k.c_str());
+            pushGAny(L, v);
+            lua_settable(L, top);
+        });
     }
     const char *upName = lua_setupvalue(L, funcIdx, upIdx);
 
@@ -574,7 +523,7 @@ GAny GAnyLuaVM::makeLuaFunctionToGAny(lua_State *L, int idx)
             [funcRef, lEnvRef, fn, upValues](const GAny **args, int32_t argc) -> GAny {
                 auto vm = GAnyLuaVM::threadLocal();
                 if (!vm) {
-                    HANDLE_EXCEPTION(GAnyException("Failed to get thread local lua vm!"));
+                    HANDLE_EXCEPTION("Failed to get thread local lua vm!");
                 }
 
                 lua_State *L = vm->getLuaState();
@@ -601,11 +550,11 @@ GAny GAnyLuaVM::makeLuaFunctionToGAny(lua_State *L, int idx)
                     /// Call
                     if (lua_pcall(L, argc, 1, 0) != LUA_OK) {
                         const char *err = lua_tostring(L, -1);
-                        HANDLE_EXCEPTION(GAnyException(err));
+                        HANDLE_EXCEPTION(err);
                     }
 
                     /// Conversion return value
-                    GAny ret =  makeLuaObjectToGAny(L, lua_gettop(L));
+                    GAny ret = makeLuaObjectToGAny(L, lua_gettop(L));
                     lua_pop(L, 1);
                     return ret;
                 }
@@ -615,10 +564,9 @@ GAny GAnyLuaVM::makeLuaFunctionToGAny(lua_State *L, int idx)
                 if (luaL_loadbuffer(
                             L, (const char *) funcRef->byteCode.data(),
                             (size_t) funcRef->byteCode.size(),
-                            (const char *) GByteArray::md5Sum(funcRef->byteCode).toHexString().c_str()) != LUA_OK) {
-                    std::stringstream ess;
-                    ess << "Load function: \"" << fn << "\" bytecode error.";
-                    HANDLE_EXCEPTION(GAnyException(ess.str()));
+                            (const char *) fn.c_str()) != LUA_OK) {
+                    const char *err = lua_tostring(L, -1);
+                    HANDLE_EXCEPTION(err);
                 }
 
                 if (lEnv) {
@@ -635,7 +583,7 @@ GAny GAnyLuaVM::makeLuaFunctionToGAny(lua_State *L, int idx)
                 /// Call
                 if (lua_pcall(L, argc, 1, 0) != LUA_OK) {
                     const char *err = lua_tostring(L, -1);
-                    HANDLE_EXCEPTION(GAnyException(err));
+                    HANDLE_EXCEPTION(err);
                 }
 
                 /// Conversion return value
@@ -662,7 +610,7 @@ GAny GAnyLuaVM::makeLuaObjectToGAny(lua_State *L, int idx)
         case LUA_TBOOLEAN:
             return (bool) lua_toboolean(L, idx);
         case LUA_TLIGHTUSERDATA:
-            HANDLE_EXCEPTION(GAnyException("GAnyLuaVM, Unexpected data type: lightuserdata"));
+            HANDLE_EXCEPTION("Unexpected data type: lightuserdata.");
         case LUA_TNUMBER: {
             double num = lua_tonumber(L, idx);
             if (num - std::floor(num) < EPS) {
@@ -749,6 +697,90 @@ bool GAnyLuaVM::isGAnyLuaObj(lua_State *L, int idx)
     lua_pop(L, 1);
 
     return false;
+}
+
+/// =======================================
+
+#define toproto(L, i) getproto(s2v(L->top.p+(i)))
+
+static const Proto *combine(lua_State *L)
+{
+    return toproto(L, -1);
+}
+
+static int luaDumpWriter(lua_State *, const void *p, size_t sz, void *ud)
+{
+    GByteArray &buff = *reinterpret_cast<GByteArray *>(ud);
+    buff.write(p, sz);
+    return 0;
+}
+
+GByteArray GAnyLuaVM::compileCode(const std::string &code, std::string sourcePath, bool strip)
+{
+    if (sourcePath.empty()) {
+        GString scriptStr = code;
+        // Ensure that UTF-8 characters are not truncated
+        if (scriptStr.count() > 512) {
+            scriptStr = scriptStr.left(512) + "...";
+        }
+        sourcePath = scriptStr.toStdString();
+    } else if (sourcePath[0] != '@') {
+        sourcePath = "@" + sourcePath;
+    }
+    GByteArray buffer;
+    buffer.write(code.data(), code.size());
+    return compile(buffer, sourcePath, strip);
+}
+
+GByteArray GAnyLuaVM::compileFile(const std::string &filePath, bool strip)
+{
+    GByteArray buffer;
+    if (sScriptReader) {
+        buffer = sScriptReader(filePath);
+    } else {
+        GFile file(filePath);
+
+        if (!file.exists()) {
+            LogE("Run lua script error: file(%s) does not exist.", filePath.c_str());
+            return GByteArray();
+        }
+
+        if (file.open(GFile::ReadOnly | GFile::Binary)) {
+            buffer = file.read();
+            file.close();
+        } else {
+            LogE("Open file failure.");
+            return GByteArray();
+        }
+    }
+
+    if (!buffer.isEmpty()) {
+        return compile(buffer, "@" + filePath, strip);
+    }
+
+    return GByteArray();
+}
+
+GByteArray GAnyLuaVM::compile(const GByteArray &buffer, const std::string &sourcePath, bool strip)
+{
+    lua_State *L = mL;
+    if (luaL_loadbuffer(L, (const char *) buffer.data(),
+                        (size_t) buffer.size(),
+                        (const char *) sourcePath.c_str()) != LUA_OK) {
+        const char *err = lua_tostring(L, -1);
+        LogE("%s", err);
+        return GByteArray();
+    }
+
+    GByteArray buff;
+    if (lua_dump(L, luaDumpWriter, (void *) &buff, strip) != LUA_OK) {
+        const char *err = lua_tostring(L, -1);
+        LogE("Dump lua code failure: %s", err);
+        buff.clear();
+    }
+
+    lua_pop(L, lua_gettop(L));
+    return buff;
 }
 
 GX_NS_END

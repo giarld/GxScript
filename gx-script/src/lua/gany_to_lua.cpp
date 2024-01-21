@@ -39,6 +39,8 @@ void GAnyToLua::toLua(lua_State *L)
             {"_null",      regGAnyNull},
             {"_parseJson", regGAnyParseJson},
             {"_equalTo",   regGAnyEqualTo},
+            {"_import",    regGAnyImport},
+            {"_export",    regGAnyExport},
 
             {nullptr,      nullptr}
     };
@@ -344,41 +346,26 @@ int GAnyToLua::noneNewIndex(lua_State *L)
 int GAnyToLua::requireLs(lua_State *L)
 {
     int n = lua_gettop(L);
-    if (n == 2) {
+    if (n >= 1) {
         if (lua_type(L, 1) != LUA_TSTRING) {
             luaL_error(L, "requireLs error: the arg1(name) requires a string");
             return 0;
         }
-        if (!GAnyLuaVM::isGAnyLuaObj(L, 2) && !lua_istable(L, 2)) {
-            luaL_error(L, "requireLs error: the arg2(env) requires a GAny object or table");
-            return 0;
-        }
         std::string name = lua_tostring(L, 1);
-        GAny env = GAnyLuaVM::makeLuaObjectToGAny(L, 2).toObject();
+
+        GAny env;
+        if (n >= 2) {
+            if (!GAnyLuaVM::isGAnyLuaObj(L, 2) && !lua_istable(L, 2)) {
+                luaL_error(L, "requireLs error: the arg2(env) requires a GAny object or table");
+                return 0;
+            }
+            env = GAnyLuaVM::makeLuaObjectToGAny(L, 2).toObject();
+        } else {
+            env = GAny::object();
+        }
 
         auto tlLua = GAnyLuaVM::threadLocal();
         GAnyLuaVM::pushGAny(L, tlLua->requireLs(name, env));
-
-        return 1;
-    } else if (n == 3) {
-        if (lua_type(L, 1) != LUA_TSTRING) {
-            luaL_error(L, "requireLs error: the arg1(path) requires a string");
-            return 0;
-        }
-        if (lua_type(L, 2) != LUA_TSTRING) {
-            luaL_error(L, "requireLs error: the arg2(name) requires a string");
-            return 0;
-        }
-        if (!GAnyLuaVM::isGAnyLuaObj(L, 3) && !lua_istable(L, 3)) {
-            luaL_error(L, "requireLs error: the arg3(env) requires a GAny object or table");
-            return 0;
-        }
-        std::string path = lua_tostring(L, 1);
-        std::string name = lua_tostring(L, 2);
-        GAny env = GAnyLuaVM::makeLuaObjectToGAny(L, 3).toObject();
-
-        auto tlLua = GAnyLuaVM::threadLocal();
-        GAnyLuaVM::pushGAny(L, tlLua->requireLs(path, name, env));
 
         return 1;
     }
@@ -456,6 +443,7 @@ int GAnyToLua::printLogE(lua_State *L)
 {
     return printLogF(3, L);
 }
+
 
 int GAnyToLua::regGAnyCreate(lua_State *L)
 {
@@ -1926,6 +1914,34 @@ int GAnyToLua::regGAnyParseJson(lua_State *L)
 
     GAnyLuaVM::pushGAny(L, obj);
     return 1;
+}
+
+int GAnyToLua::regGAnyImport(lua_State *L)
+{
+    if (lua_gettop(L) == 0) {
+        luaL_error(L, "Call GAny Import error: Missing parameters");
+        return 0;
+    }
+
+    if (lua_isstring(L, 1)) {
+        std::string path = lua_tostring(L, 1);
+        GAnyLuaVM::pushGAny(L, GAny::Import(path));
+    } else {
+        GAnyLuaVM::pushGAny(L, GAny::undefined());
+    }
+    return 1;
+}
+
+int GAnyToLua::regGAnyExport(lua_State *L)
+{
+    GAny *self = glua_getcppobject(L, GAny, 1);
+    if (!self) {
+        luaL_error(L, "Call GAny Export error: null object");
+        return 0;
+    }
+
+    GAny::Export(self->as<std::shared_ptr<GAnyClass>>());
+    return 0;
 }
 
 GX_NS_END

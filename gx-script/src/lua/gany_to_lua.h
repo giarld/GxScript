@@ -227,6 +227,10 @@ private:    /// ToLua
     static int regGAnyToObject(lua_State *L);
 
     static int regGAnyParseJson(lua_State *L);
+
+    static int regGAnyImport(lua_State *L);
+
+    static int regGAnyExport(lua_State *L);
 };
 
 GX_NS_END

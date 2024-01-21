@@ -41,7 +41,7 @@ return function(a, b)
 end
 )";
 
-    auto tGAnyLuaVM = GEnv["L.GAnyLuaVM"];
+    auto tGAnyLuaVM = GAny::Import("L.GAnyLuaVM");
 
 
     auto lua = tGAnyLuaVM.call("threadLocal");
@@ -49,7 +49,6 @@ end
     lua.call("gcSetPause", 100);
 
     GAny env = GAny::object();
-    env["GEnv"] = GEnv;
 
     env["cppFunc"] = [](int32_t begin, int32_t end) {
         std::vector<int32_t> array;

@@ -51,8 +51,6 @@ private:
 
     static int regInherit(lua_State *L);
 
-    static int regRegisterToEnv(lua_State *L);
-
     static int regFunc(lua_State *L);
 
     static int regStaticFunc(lua_State *L);
